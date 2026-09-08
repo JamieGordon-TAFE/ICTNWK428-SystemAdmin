@@ -4,7 +4,7 @@ function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
-        [string]$LogFile = "C:\Logs\Application.log"
+        [string]$LogFile = "C:\myLogs\system_admin.log"
     )
 
     try {
@@ -328,4 +328,132 @@ function Configure-DHCPServices {
     catch {
         Write-Log -Message "Failed DHCP test: $($_.Exception.Message)"
     }
+}
+
+# Function to check the top ten system errors
+function Get-TopTenSystemErrors {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$TargetIP
+    )
+
+    # Ensure target is reachable
+    Write-Log -Message "Checking connectivity to $TargetIP..."
+    if (-not (Test-Connection -ComputerName $TargetIP -Count 2 -Quiet)) {
+        Write-Error "Target computer '$TargetIP' is not reachable."
+        return
+    }
+
+    # Ensure log directory exists
+    $logPath = "C:\myLogs"
+    if (-not (Test-Path $logPath)) {
+        New-Item -Path $logPath -ItemType Directory | Out-Null
+    }
+
+    $outputFile = "$logPath\toptenerrors.txt"
+
+    Write-Log -Message "Collecting System log errors from $TargetIP..."
+
+    try {
+        $errors = Invoke-Command -ComputerName $TargetIP -ScriptBlock {
+            # Get only Error-level events from System log
+            Get-WinEvent -LogName System | Where-Object { $_.LevelDisplayName -eq "Error" }
+        }
+
+        if (-not $errors) {
+            Write-Log -Message "No error events found on $TargetIP."
+            return
+        }
+
+        # Group by Event ID, count occurrences, sort by frequency
+        $topTen = $errors |
+        Group-Object Id |
+        Sort-Object Count -Descending |
+        Select-Object -First 10
+
+        # Save to file
+        $topTen | Out-File -FilePath $outputFile
+
+        Write-Log -Message "Top ten errors saved to $outputFile"
+    }
+    catch {
+        Write-Log -Message "Failed to retrieve or process event logs: $($_.Exception.Message)"
+    }
+}
+
+# Function to set dailt disk cleanups
+function Set-DailyDiskCleanup {
+    [CmdletBinding()]
+    param(
+        [string]$TargetIP = "localhost"
+    )
+
+    # Check connectivity unless localhost
+    if ($TargetIP -ne "localhost") {
+        Write-Log -Message "Checking connectivity to $TargetIP..."
+        if (-not (Test-Connection -ComputerName $TargetIP -Count 2 -Quiet)) {
+            Write-Log -Message "Target computer '$TargetIP' is not reachable."
+            return
+        }
+    }
+
+    Write-Log -Message "Configuring scheduled task on $TargetIP..."
+
+    try {
+        Invoke-Command -ComputerName $TargetIP -ScriptBlock {
+
+            # Define task components
+            $action = New-ScheduledTaskAction -Execute "cleanmgr.exe"
+            $trigger = New-ScheduledTaskTrigger -Daily -At 6:00AM
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+            # Register the task
+            Register-ScheduledTask `
+                -TaskName "DailyDiskCleanup" `
+                -Action $action `
+                -Trigger $trigger `
+                -Settings $settings `
+                -Description "Runs Disk Cleanup every day at 6 AM"
+
+        }
+
+        Write-Log -Message "Scheduled task 'DailyDiskCleanup' created successfully on $TargetIP."
+    }
+    catch {
+        Write-Log -Message "Failed to create scheduled task: $($_.Exception.Message)"
+    }
+}
+
+# Create network share drive
+function Map-NetworkDrive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServerName,
+
+        [string]$ShareName = "mickandmacks_share",
+
+        [string]$DriveLetter = "S"
+    )
+
+    $drive = "${DriveLetter}:"
+    $path  = "\\$ServerName\$ShareName"
+
+    Write-Log -Message "Mapping drive $drive to $path..."
+
+    # Remove existing mapping if present
+    if (Get-PSDrive -Name $DriveLetter -ErrorAction SilentlyContinue) {
+        Write-Log -Message "Existing mapping found. Removing..."
+        Remove-PSDrive -Name $DriveLetter -Force
+    }
+
+    # Create new mapping
+    try {
+        New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $path -Persist
+        Write-Log -Message "Drive $drive successfully mapped to $path."
+    }
+    catch {
+        Write-Log -Message "Failed to map drive: $($_.Exception.Message)"
+    }    
 }
