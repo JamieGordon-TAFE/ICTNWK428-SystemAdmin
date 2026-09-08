@@ -109,3 +109,93 @@ function Connect-RemoteComputer {
         Write-Log -Message "Failed to connect to $ComputerName. $($_.Exception.Message)" throw
     }
 }
+
+# Function to add new Organisation Units to active directory
+function Add-ADOrganistationalUnit {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$OuName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ParentDN
+    )
+
+    # Create the full DN
+    $OuDN = "OU=$OuName, $ParentDN"
+    Write-Log -Message "Checking the if the OU '$OuName' already exists..."
+
+    # Sanity check for already existing OU
+    if(Get-ADOrganisationalUnit -LDAPFilter "(distinguishedName=$ouName)" -ErrorAction SilentlyContinue) {
+        Write-Log -Message "The OU '$OuName' already exists under '$ParentDN'."
+        return
+    }
+
+    try {
+        New-ADOrganistationalUnit -Name $OuName -Path $ParentDN
+        Write-Log -Message "The OU '$OuName' has been successfully created in '$ParentDN'"
+    }
+    catch {
+        Write-Log -Message "There was an issue creating the OU: $($_.Exception.Message)"
+    }
+}
+
+# Function to add new users from CSV file
+function New-ADUserFromFile {
+    [CmdletBinding()]
+    
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$CsvPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetOu
+    )
+
+    # Sanity check for CSV file
+    if(-not(Test-Path $CsvPath) {
+        Write-Log -Message "The '.csv' file at '$CsvPath' does not exist."
+        return
+    }
+
+    # Import the user csv file
+    $users = Import-Csv -Path $CsvPath
+
+    foreach ($u in $users) {
+
+        # Required fields check
+        if (-not $u.SamAccountName -or -not $u.GivenName -or -not $u.Surname -or -not $u.Password) {
+            Write-Log -Message "User has been skipped due to missing required data: $($u | Out-String)"
+            continue
+        }
+
+        $userDN = "CN=$($u.GivenName) $($u.Surname),$TargetOU"
+
+        # Check if the user already exists
+        if (Get-ADUser -Filter "SamAccountName -eq '$($u.SamAccountName)'" -ErrorAction SilentlyContinue) {
+            Write-Log -Message "The user '$($u.SamAccountName)' already exists."
+            continue
+        }
+
+        try {
+            # Create the user
+            New-ADUser `
+                -SamAccountName $u.SamAccountName `
+                -UserPrincipalName "$($u.SamAccountName)@domain.local" `
+                -Name "$($u.GivenName) $($u.Surname)" `
+                -GivenName $u.GivenName `
+                -Surname $u.Surname `
+                -DisplayName "$($u.GivenName) $($u.Surname)" `
+                -AccountPassword (ConvertTo-SecureString $u.Password -AsPlainText -Force) `
+                -Enabled $true `
+                -Path $TargetOU
+
+            Write-Log -Message "Succesfully created the user: $($u.SamAccountName)"
+
+        }
+        catch {
+            Write-Log -Message "Failed to create the user '$($u.SamAccountName)': $($_.Exception.Message)"
+        }
+    }
+    
+}
