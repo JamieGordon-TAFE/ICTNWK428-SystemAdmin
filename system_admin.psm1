@@ -181,7 +181,7 @@ function New-ADUserFromFile {
             # Create the user
             New-ADUser `
                 -SamAccountName $u.SamAccountName `
-                -UserPrincipalName "$($u.SamAccountName)@domain.local" `
+                -UserPrincipalName "$($u.SamAccountName)@JGmicksandmacks.local" `
                 -Name "$($u.GivenName) $($u.Surname)" `
                 -GivenName $u.GivenName `
                 -Surname $u.Surname `
@@ -198,4 +198,134 @@ function New-ADUserFromFile {
         }
     }
     
+}
+
+# Function to join computers to the domain
+function Add-ComputerToDomain {
+    [CmdletBinding()]
+
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DomainName
+    )
+
+    # Prompt the user for admin creds
+    $creds = Get-Credential -Message "Enter the credentials for domain administator"
+    Write-Log -Message "Prompted the user for domain credentials"
+
+    # Testing connectivity to target
+    Write-Log -Message "Testing the connectivity to '$ComputerName'..."
+    if(-not (Test-Connection -ComputerName $ComputerName -Count 2 -Quiet)) {
+        Write-Log -Message "The computer '$ComputerName' was not reachable."
+        return
+    }
+
+    try {
+        # Add the target computer to the domain
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            param($DomainName, $creds)
+            Add-Computer -DomainName $DomainName -Credential $creds -ErrorAction Stop
+        } -ArgumentList $DomainName, $creds
+
+        Write-Log -Message "The computer '$ComputerName' has successfully joined the domain '$DomainName'."
+
+        # Restart the target computer
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock { Restart-Computer -Force }
+    }
+    catch {
+        Write-Log -Message "Failed to join computer to domain: $($_.Exception.Message)"
+    }
+}
+
+# Function to configure the DHCP services
+function Configure-DHCPServices {
+    [CmdletBinding()]
+
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DhcpServer,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ClientComputer
+    )
+
+    # Sanity check for DHCP role on server, install if not found
+    if (-not (Get-WindowsFeature -Name DHCP).Installed) {
+        Write-Log -Message "The DHCP role was not installed. Installing it now..."
+        Install-WindowsFeature -Name DHCP -IncludeManagementTools
+    }
+
+    # Configure the DHCP Service
+    Write-Log -Message "Authorizing DHCP server in Active Directory..."
+    Add-DhcpServerInDC -DnsName $DhcpServer -IpAddress (Resolve-DnsName $DhcpServer).IPAddress
+
+    # Check existing scopes
+    Write-Log -Message "Checking existing DHCP scopes..."
+    $existingScopes = Get-DhcpServerv4Scope -ComputerName $DhcpServer -ErrorAction SilentlyContinue
+
+    if ($existingScopes) {
+        Write-Log -Message "Existing scopes found:"
+        $existingScopes | Format-Table ScopeId, Name, State
+    }
+    else {
+        Write-Log -Message "No existing scopes found."
+    }
+
+    # Define desired scope
+    $scopeId = "10.1.1.0"
+    $startRange = "10.1.1.50"
+    $endRange   = "10.1.1.200"
+    $subnetMask = "255.255.255.0"
+
+    # Create scope only if missing
+    if ($existingScopes.ScopeId -contains $scopeId) {
+        Write-Log -Message "Scope $scopeId already exists."
+    }
+    else {
+        Write-Log -Message "Creating new DHCP scope $scopeId..."
+        Add-DhcpServerv4Scope `
+            -ComputerName $DhcpServer `
+            -Name "Main LAN Scope" `
+            -ScopeId $scopeId `
+            -StartRange $startRange `
+            -EndRange $endRange `
+            -SubnetMask $subnetMask `
+            -State Active
+    }
+
+    # Add common options
+    Write-Log -Message  "Configuring DHCP options..."
+    Set-DhcpServerv4OptionValue -ComputerName $DhcpServer -ScopeId $scopeId -Router "10.1.1.1"
+    Set-DhcpServerv4OptionValue -ComputerName $DhcpServer -ScopeId $scopeId -DnsServer "10.1.1.10"
+    Set-DhcpServerv4OptionValue -ComputerName $DhcpServer -ScopeId $scopeId -DnsDomain "JGmicksandmacks.local"
+
+    Write-Log -Message "DHCP configuration complete."
+
+    # Test DHCP using client
+    Write-Log -Message "Testing DHCP from client $ClientComputer..."
+
+    if (-not (Test-Connection -ComputerName $ClientComputer -Count 2 -Quiet)) {
+        Write-Log -Message "Client '$ClientComputer' is not reachable. Cannot test DHCP."
+        return
+    }
+
+    try {
+        Invoke-Command -ComputerName $ClientComputer -ScriptBlock {
+            Write-Log -Message "Releasing IP..."
+            ipconfig /release
+
+            Start-Sleep -Seconds 3
+
+            Write-Log -Message "Renewing IP..."
+            ipconfig /renew
+        }
+
+        Write-Log -Message "DHCP test complete."
+    }
+    catch {
+        Write-Log -Message "Failed DHCP test: $($_.Exception.Message)"
+    }
 }
