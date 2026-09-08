@@ -1,36 +1,43 @@
+$Script:LogServerIP = "10.1.1.10"
+
 # Function to output script operations to a dedicated log file
 function Write-Log {
     [CmdletBinding()]
-    param(
+    param (
         [Parameter(Mandatory = $true)]
         [string]$Message,
+
         [string]$LogFile = "C:\myLogs\system_admin.log"
     )
 
+    $ServerIP = $Script:LogServerIP
+
+    # Timestamp
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    # Caller function name
+    $CallerFunction = (Get-PSCallStack)[1].FunctionName
+
+    # Build log entry
+    $LogEntry = "$TimeStamp - [$CallerFunction] $Message"
+
     try {
-        # Create the log file if it doesn't exist
-        $LogDirectory = Split-Path $LogFile -Parent
+        Invoke-Command -ComputerName $ServerIP -ScriptBlock {
+            param($LogFile, $LogEntry)
 
-        if (-not (Test-Path $LogDirectory)) {
-            New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
-        }
+            # Ensure directory exists
+            $LogDirectory = Split-Path $LogFile -Parent
+            if (-not (Test-Path $LogDirectory)) {
+                New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
+            }
 
-        # Timestamp
-        $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8
 
-        # The caller function
-        $CallerFunction = (Get-PSCallStack)[1].FunctionName
-
-        # Build log entry
-        $LogEntry = "$Timestamp - [$CallerFunction] $Message"
-
-        # Write to log file
-        Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8
-
-        }
-        catch {
-            Write-Warning "Unable to write to the log file. $($_.Exception.Message)"
-        }        
+        } -ArgumentList $LogFile, $LogEntry
+    }
+    catch {
+        Write-Warning "Unable to write to server log. $($_.Exception.Message)"
+    }        
 }
 
 # Function to Install AD DS Role to the server
